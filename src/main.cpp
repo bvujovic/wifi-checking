@@ -19,7 +19,7 @@ Blinky led = Blinky::create();
 #endif
 
 // Sending an actual WhatsApp message or not (testing purposes).
-#define REAL_SEND_MSG true
+#define REAL_SEND_MSG false
 
 // Milliseconds in 1 second.
 #define SEC (1000)
@@ -28,6 +28,27 @@ Blinky led = Blinky::create();
 
 // Deep sleep time in microseconds.
 #define SLEEP_INTERVAL 1000 * (DEBUG ? 15 * SEC : 5 * MIN)
+
+enum CheckResult
+{
+  NotChecked,
+  Good,
+  Bad
+};
+
+struct Net
+{
+  bool checkWiFi;
+  String ssid;
+  String pass;
+  CheckResult result;
+};
+
+LinkedList<Net *> *nets = new LinkedList<Net *>();
+Net *goodNet = NULL;
+String badNets = "";
+String goodNets = "";
+String skippedNets = "";
 
 bool connectToWiFi(String ssid, String pass)
 {
@@ -49,15 +70,21 @@ bool connectToWiFi(String ssid, String pass)
 /// @brief Sends WhatsApp message about failed WiFi networks.
 /// @param ssids Names of failed WiFi networks.
 /// @return HTTP response code for sent message.
-int sendWhatsAppMessage(String ssids)
+int sendWhatsAppMessage()
 {
   writeln("sendWhatsAppMessage");
 #if REAL_SEND_MSG
   //* https://www.callmebot.com/blog/free-api-whatsapp-messages/
   String url = "http://api.callmebot.com/whatsapp.php?";
   url = url + "phone=" + CMB_PHONE;
-  // https://www.callmebot.com/blog/test-whatsapp-api/ 📶 WiFi mreže: Sveti Sava, Tech... ne rade.
-  url = url + "&text=" + "📶%20WiFi%20mreže:%20" + ssids + "%20ne%20rade.";
+  // https://www.callmebot.com/blog/test-whatsapp-api/ 📶 WiFi mreže: Sveti Sava, Tech... NE rade.
+  url = url + "&text=" + "📶+Školske+WiFi+mreže:%0A";
+  if (badNets != "")
+    url += "NE+rade:+" + badNets;
+  if (badNets != "" && goodNets != "")
+    url += "%0A"; // separator (new line) between list of bad and good nets
+  if (goodNets != "")
+    url += "Rade:+" + goodNets;
   url = url + "&apikey=" + CMB_API_KEY;
   writeln(url);
   WiFiClient wiFiClient;
@@ -77,49 +104,95 @@ int sendWhatsAppMessage(String ssids)
 #endif
 }
 
-enum CheckResult
-{
-  NotChecked,
-  Good,
-  Bad
-};
-
-struct Net
-{
-  String ssid;
-  String pass;
-  CheckResult result;
-};
-
 /// @brief Reads data about wifi networks from data/nets.csv.
 /// @return List of networks that should be checked.
-LinkedList<Net *> *readNetworkData()
+void readNetworkData()
 {
-  LinkedList<Net *> *nets = new LinkedList<Net *>();
+  writeln("readNetworkData");
   File f = LittleFS.open("nets.csv", "r");
   if (f)
   {
     while (f.available())
     {
       String line = f.readStringUntil('\n');
+      writeln(line);
       if (line.length() == 0)
         continue;
-      // e.g. "1+WiFiName+WiFiPass"
-      if (line[0] == '1')
+      // e.g. "1+WiFiName+WiFiPass+2"
+      // if (line[0] == '1') // 1 - check the wifi, 0 - skip
       {
-        int idx1 = line.indexOf('+');
+        int idx1 = line.indexOf('+'); // '+' between check? and ssid
         if (idx1 == -1)
           continue;
-        int idx2 = line.indexOf('+', idx1 + 1);
+        int idx2 = line.indexOf('+', idx1 + 1); // '+' between ssid and pass
         if (idx2 == -1 || idx1 >= idx2)
           continue;
-        Net *net = new Net{line.substring(idx1 + 1, idx2), line.substring(idx2 + 1, line.length() - 1), NotChecked};
+        int idx3 = line.indexOf('+', idx2 + 1); // '+' between pass and result
+        if (idx3 == -1 || idx2 >= idx3)
+          continue;
+        // string "0" or "1" or "2" -> character '0' or '1' or '2' -> number (int) 0 or 1 or 2
+        int res = line.substring(idx3 + 1, line.length())[0] - '0';
+        Net *net = new Net{
+            (bool)(line[0] - '0'),
+            line.substring(idx1 + 1, idx2),
+            line.substring(idx2 + 1, idx3),
+            (CheckResult)(res >= NotChecked && res <= Bad ? res : NotChecked)};
+        // writeln(net->ssid);
+        // writeln(net->pass);
+        // writeln(net->result);
         nets->add(net);
       }
+      // else skippedNets += line + '\n';
     }
     f.close();
   }
-  return nets;
+}
+
+void saveNetworkData()
+{
+  writeln("saveNetworkData");
+  File f = LittleFS.open("nets.csv", "w");
+  if (f)
+  {
+    // // checked nets
+    for (int i = 0; i < nets->size(); i++)
+    {
+      Net *net = nets->get(i);
+      // e.g. "1+WiFiName+WiFiPass+2"
+      String line = String(net->checkWiFi) + "+" + net->ssid + "+" + net->pass + "+" + net->result + "\n";
+      f.write(line.c_str());
+    }
+    // // skipped nets
+    // f.write(skippedNets.c_str());
+    f.close();
+  }
+}
+
+void checkNets()
+{
+  writeln("Checking WiFi networks...");
+  for (int i = 0; i < nets->size(); i++)
+  {
+    Net *net = nets->get(i);
+    if (!net->checkWiFi)
+      continue;
+    writeln(net->ssid);
+    bool success = connectToWiFi(net->ssid, net->pass);
+    writeln(success);
+    if (success)
+    {
+      if (goodNet == NULL)
+        goodNet = net;
+      if (net->result == Bad) // wifi was bad, now it's good
+        goodNets += (goodNets != "" ? ", " : "") + net->ssid;
+    }
+    else if (net->result != Bad) // wifi was bad or not checked
+      badNets += (badNets != "" ? ", " : "") + net->ssid;
+    net->result = success ? Good : Bad;
+    WiFi.disconnect();
+  }
+  writeln("Bad nets: " + badNets);
+  writeln("Good nets: " + goodNets);
 }
 
 void setup()
@@ -129,38 +202,25 @@ void setup()
   pinMode(led.getPin(), OUTPUT);
   LittleFS.begin();
 
-  writeln("Checking WiFi networks...");
-  LinkedList<Net *> *nets = readNetworkData();
-  Net *goodNet = NULL;
-  String badNets = "";
-  for (int i = 0; i < nets->size(); i++)
-  {
-    Net *net = nets->get(i);
-    writeln(net->ssid);
-    bool success = connectToWiFi(net->ssid, net->pass);
-    writeln(success);
-    net->result = success ? Good : Bad;
-    if (success)
-    {
-      if (goodNet == NULL)
-        goodNet = net;
-    }
-    else
-      badNets += (badNets != "" ? ", " : "") + net->ssid;
-  }
-  writeln(badNets);
+  readNetworkData();
+  checkNets();
 
   // if there are bad networks to report on and at least one good network to be able to send message
-  if (badNets != "" && goodNet != NULL)
+  if ((badNets != "" || goodNets != "") && goodNet != NULL)
   {
     writeln("Sending WA msg...");
-    bool success = connectToWiFi(goodNet->ssid, goodNet->pass);
+    bool success = REAL_SEND_MSG ? connectToWiFi(goodNet->ssid, goodNet->pass) : true;
     if (success)
-      sendWhatsAppMessage(badNets);
+    {
+      badNets.replace(' ', '+');
+      goodNets.replace(' ', '+');
+      sendWhatsAppMessage();
+    }
     else
       ESP.reset();
   }
-  
+  saveNetworkData();
+
   writeln("Sleep...");
   ESP.deepSleep(SLEEP_INTERVAL);
 }
